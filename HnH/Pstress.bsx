@@ -1,0 +1,212 @@
+'{$STAMP BS2sx}
+'{$PBASIC 2.5}
+'________________________________________________________________
+
+'Program:
+' Investigate Stress GSR Biofeedback demonstration
+' May 2008 by Peter Reintjes
+' Museum of Life and Science, Durham, NC
+'
+' Original version of this code from
+' Harmony and Health GSR / Bio Feedback display Mar '07
+' by Brian Hambleton of the Ontario Science Center
+'
+'_________________________________________________________________
+
+'Hardware interface with the 7219:
+  DATA_n  CON  7  'Bits are shifted out this pin # to 7219.
+  CLK     CON  5  'Data valid on rising edge of this clock pin.
+  Load    CON  6  'Tells 7219 to transfer data to LEDs.
+
+'Register addresses for the MAX7219. To control a given attribute
+'of the display, for instance its brightness or the number shown
+'in a particular digit, you write the register address followed
+'by the data. For example, to set the brightness, you'd send
+''brite' followed by a number from 0 (off) to 15 (100% bright).
+
+  PulseLength CON   5   'Pulse length value to display
+  decode      CON   9   'Decode register; a 1 turns on BCD decoding.
+  brite       CON  10   'Decode register; intensity register.
+  scan        CON  11   'Decode register; scan-limit register.
+  switch      CON  12   'Decode register; on/off register.
+  test        CON  15   'Activates test mode (all digits on, 100% bright)
+'__________________________________________________________________
+
+  max_dat  VAR  Word         'Word to be sent to MAX7219.
+  gsr      VAR  Word         'gsr pulse length
+  bp       VAR  Byte         'bit position counter
+  index    VAR  Nib          'FOR LOOP index for setup table
+  odd      VAR  index.BIT0   'Lsb of index for odd/even byte word loading
+  mark     VAR  Bit
+  initial  VAR  Bit          'True for the first GSR reading of a user
+  idle     VAR  Word
+
+  HighGSR  VAR Word       ' Highest GSR Reading of current user
+  LowGSR   VAR Word       ' Lowest GSR Reading of current user
+  DefaultGSRRange CON 10
+
+  Delay   VAR Byte  ' Delay value for LED ring speed
+
+  Scale    VAR Word  ' Scale and Offset are parameters for translation
+  Offset   VAR Word  ' Delay = GSR*Scale + Offset
+
+  FastDisp  CON 8     ' Minimum delay (fastest rotation of LEDs)
+  SlowDisp  CON 100   ' Maximum delay (slowest rotation of LEDs)
+  DispRange CON 92    ' The difference between them
+
+'The program begins by setting up all pins to output low, matching
+'the state established by the pulldown resistors.
+
+
+  OUTS = 0        'All output latches low.
+  DIRS = $FFFF    'All pins to output.
+  initial = 1     'Need to do GSR Calibration for new User
+
+  GOSUB InitializeMax
+
+' ====================== MAIN PROGRAM LOOP ==========================
+' Now that the MAX7219 is properly initialized, we're ready to send it
+' data. The loop below increments a 16-bit counter and displays it on
+' the LEDs connected to the MAX. Subroutines below handle the details
+' of converting binary values to binary-coded decimal (BCD) digits and
+' sending them to the MAX.
+
+  Delay = 25
+  GOSUB Spin
+  GOSUB Spin
+  GOSUB Spin
+    Delay = 10
+  GOSUB Spin
+  GOSUB Spin
+  GOSUB Spin
+    Delay = 5
+  GOSUB Spin
+  GOSUB Spin
+  GOSUB Spin
+    Delay = 1
+  GOSUB Spin
+  GOSUB Spin
+  GOSUB Spin
+
+Main:
+  bp=1
+  DO
+
+   FOR index = 1 TO 8    'Work from digit 1 down to digit 8.
+    SHIFTOUT DATA_n,CLK,MSBFIRST,[index]
+    SHIFTOUT DATA_n,CLK,MSBFIRST,[bp]
+    PULSOUT Load,PulseLength
+
+
+    GOSUB GetGSRValue
+
+    PAUSE Delay
+
+    SHIFTOUT DATA_n,CLK,MSBFIRST,[index]  'Send digit position.
+    SHIFTOUT DATA_n,CLK,MSBFIRST,[0]'Send the digit.
+    PULSOUT Load,PulseLength      'And load the display.
+
+     NEXT        ' index
+     bp = bp << 1
+    LOOP UNTIL bp = 0
+
+GOTO Main  ' Main Program keeps looping forever
+
+END
+
+'
+' GetGSRValue updates the Delay variable with an
+' adaptively scaled delay proportional to the GSR value
+' If it fails to read a good value it puts the system into
+' Initial mode whereby it will re-calibrate for the next user
+' A zero GSR reading will not automatically recalibrate the
+' system, but if a zero reading for more than 10 seconds will.
+'
+
+  GetGSRValue:
+
+        idle = idle + 1
+        IF (idle > 30) THEN
+             initial = 1
+             idle = 0
+             GOSUB Blank
+        ENDIF
+
+  PULSIN 1,1,gsr
+  IF (gsr = 0 OR gsr>255) THEN GetGSRValue
+
+  idle = 0
+
+  IF ( initial = 1 ) THEN
+    initial = 0
+    HighGSR = gsr
+    LowGSR  = HighGSR + DefaultGSRRange
+    GOSUB ComputeDelay
+    GOTO GetGSRValue
+  ENDIF
+
+  IF (gsr > LowGSR) THEN
+    LowGSR = gsr
+    GOSUB ComputeDelay
+  ELSEIF (gsr < HighGSR) THEN
+    HighGSR = gsr
+    GOSUB ComputeDelay
+  ENDIF
+  Delay = (gsr-HighGSR) * Scale + Offset
+  Delay = (Delay >> 3)
+  IF Delay = 0 THEN GOTO GetGSRValue
+  RETURN
+
+ComputeDelay:
+
+   Scale = DispRange/(LowGSR-HighGSR)
+   Offset = FastDisp
+
+   RETURN
+
+'Next, it initializes the MAX7219. A lookup table is convenient way
+'to organize the setup data; each register address is paired with
+'its setting data. The table sets the scan limit to  (8 digits,
+'numbered 1-8); brightness to 15(maximum); BCD decoding to the lower 5 digits
+'(the only ones we're displaying), and switches the display on. The
+'MAX7219 expects data in 16-bit packets, but our lookup table holds
+'a series of 8-bit values. That's why the loop below is designed to
+'pulse the Load line _every_other_ byte transmitted.
+
+ InitializeMax:
+
+  FOR index = 0 TO 7    'Retrieve 8 items from table.
+     LOOKUP index,[scan,7,brite,3,decode,0,switch,1],max_dat
+     SHIFTOUT DATA_n,CLK,MSBFIRST,[max_dat]
+     IF odd = 1 THEN PULSOUT Load,PulseLength
+  NEXT        'Get next item from table.
+
+ RETURN
+
+ Spin:
+    bp=1
+    DO
+      FOR index = 1 TO 8    'Work from digit 1 down to digit 8.
+
+    SHIFTOUT DATA_n,CLK,MSBFIRST,[index]
+    SHIFTOUT DATA_n,CLK,MSBFIRST,[bp]
+    PULSOUT Load,PulseLength
+
+    PAUSE Delay
+
+    SHIFTOUT DATA_n,CLK,MSBFIRST,[index] 'Send digit position.
+    SHIFTOUT DATA_n,CLK,MSBFIRST,[0]     'Send the digit.
+    PULSOUT Load,PulseLength             'And load the display.
+
+      NEXT        ' index
+    bp = bp << 1
+  LOOP UNTIL bp = 0
+  RETURN
+
+  Blank:
+   FOR index = 1 TO 8                      ' From digit 1 to digit 8.
+       SHIFTOUT DATA_n,CLK,MSBFIRST,[index] 'Send digit position.
+       SHIFTOUT DATA_n,CLK,MSBFIRST,[0]     'Send the digit.
+       PULSOUT Load,PulseLength             'And load the display.
+   NEXT        ' index
+  RETURN

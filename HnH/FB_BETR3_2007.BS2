@@ -1,0 +1,277 @@
+' {$STAMP BS2}
+' {$PBASIC 2.0}
+
+'Program: fb_btr3.BS2 version 3 9/01/97
+'Question of Truth show Bio Feed back exhibit control program
+'Ontario Science Centre
+'770 Don Mills Road
+'Don Mills, Ontario
+'M3C 1T3
+
+'1996 Question of Truth Show, Psycology
+'Exhibit #4005-2645
+
+'programmer B. Hambleton
+'This program operates the hardware of the Bio Feedback exhibit of the OSC
+'Question of Truth show.
+
+'The hardware of the system comprises a basic stampII upon which this code
+'is executed, a Thought Technologies calmpute is employed to do the actual
+'GSR (Galvanic Skin Response) measurements and a Max 7219 LED dislplay chip
+'provides the feedback stimulus output to the participant. This output is
+'64 discrete LEDs arranged in a 23" diameter circular pattern.
+
+'In addition to the visual Bio feed back system there is also
+'an audio component to this exhibit comprising a CD player and Technovision
+'PC II controller. The audio playback is started by a coinco push button.
+'The Stamp has the capacity built in to both the software and the hardware
+'of the custom PC board to start the playback of the CD tracks germaine to
+'this exhibit automaticlly whenever a participants 'connect' themselves to
+'the gsr sensor. A reed relay electriclly parralleled with the coinco
+'accomplishes this. This audio automatic start feature however was not
+'exploited for the show at opening however.
+
+
+'For the purposes of this exhibit, changes in GSR have been accepted as a
+'sufficiently accurate indicator of the participants level of stress.
+'Instantaneous GSR readings at any point are only of significance when
+'considered in context of their value relative to a reference point and
+'the trends that successive readings indicate. In this case the reference
+'point is taken as an initial reading close to the time the participant
+'first 'connects' with the calmpute. The trends are established and
+'fedback to the participant by varying the rate at which a few lit LED's
+'are sequenced around the 23 inch diameter ring.
+
+'The calmpute is a device made by Thought Technologies of Belgrave Ave
+'Montreal PQ (514-489-8251 voice 514-489-8255 fax) to measure GSR. The
+'calmpute derrives it's operating power from an internal 9v battery
+'and is designed to provide a true rs232 level signal to a line of a
+'seral port on a PC. The output of the calmpute is opto isolated for
+'participants safety.
+
+'The circuit board custom produced for this exhibit bears the name:
+
+'  "Calmpute Interface PCB 09/96"
+
+'This PC Board is equipped with a male DB25 connector wired so as to be
+'directly compatible with the calmpute. The rs232 signal between the
+'stamp and the calmpute is 0 - 5v levels.
+
+'The calmpute o/p appears to the stamp as a pulse of varying duration. The
+'stamp's pulsein command is used to measure the length of the pulse.
+'Values in the 10,000 - 25,000 range as reported by the pulsin command are
+'typical for participants although counts up to 30,000 are reported in
+'cases of a direct short at the calmpute electrodes. When the calmpute
+'electrodes are open circuit (ie: no participant connected), a zero count
+'is reported by the pulsin command.
+
+'Since each participant potentially has a different initial gsr reading
+'the  program stores the gsr value from the second execution cycle after
+'a participant is detected. A zero count from the pulsin command is
+'interpreted to mean no one is connected to the calmpute, as soon as the
+'count becomes non zero a few cycles are taken up with establishing inital
+'values for later reference.
+
+
+'________________________________________________________________
+
+'Program:
+
+'Initilalization section
+'_________________________________________________________________
+'Constant declaration:
+
+' Hardware interface with the 7219:
+DATA_n  CON  7  ' Bits are shifted out this pin # to 7219.
+CLK     CON  5  ' Data valid on rising edge of this clock pin.
+Load    CON  6  ' Tells 7219 to transfer data to LEDs.
+
+' Register addresses for the MAX7219. To control a given attribute
+' of the display, for instance its brightness or the number shown
+' in a particular digit, you write the register address followed
+' by the data. For example, to set the brightness, you'd send
+' 'brite' followed by a number from 0 (off) to 15 (100% bright).
+decode   CON  9  ' Decode register; a 1 turns on BCD decoding.
+brite  CON  10  ' "       "   " intensity register.
+scan  CON  11  ' "       "   " scan-limit register.
+switch  CON  12  ' "       "   " on/off register.
+test  CON  15  ' Activates test mode (all digits on, 100% bright)
+
+PulseLength CON 5
+'__________________________________________________________________
+'Variable declaration:
+' Variables used in the program.
+max_dat  VAR  Word  ' Word to be sent to MAX7219.
+index   VAR  Nib  ' Index into setup table.
+bp  VAR  Byte  ' bit position counter
+temp  VAR  Nib  ' Temporary variable used in outputting digits.
+flp  VAR  Bit  ' Flag used in changing directions.
+dispVal  VAR  Byte (10)' Value to be displayed on the LEDs
+nina  VAR  Byte  'led bit on counter
+ninit  CON  7  'initial nina value
+carry  VAR  Bit  'shift carry flag
+cycle  VAR  Byte  'display 'digit' counter
+odd  VAR  index.BIT0  ' Lsb of index.
+top  VAR  Byte
+gsr  VAR  Word  'gsr pulse length
+gsra  VAR  Word  'average gsr pulse length
+gsrinit  VAR  Word  'storeage of inital gsr value
+av  VAR  Byte  'average base counter
+'chance  var  word  'downtime rate randomizer
+led  VAR  Byte  'led test shift variable
+initr  VAR  Nib  'counter for gsr init sample
+'DL VAR Nib
+
+' The program begins by setting up all pins to output low, matching
+' the state established by the pulldown resistors.
+OUTS = 0    ' All output latches low.
+DIRS = $FFFF    ' All pins to output.
+
+' Next, it initializes the MAX7219. A lookup table is convenient way
+' to organize the setup data; each register address is paired with
+' its setting data. The table sets the scan limit to 4 (5 digits,
+' numbered 0-4); brightness to 3; BCD decoding to the lower 5 digits
+' (the only ones we're displaying), and switches the display on. The
+' MAX7219 expects data in 16-bit packets, but our lookup table holds
+' a series of 8-bit values. That's why the loop below is designed to
+' pulse the Load line _every_other_ byte transmitted.
+FOR index = 0 TO 7    ' Retrieve 8 items from table.
+  LOOKUP index,[scan,7,brite,15,decode,$00,switch,1],max_dat
+  SHIFTOUT DATA_n,CLK,MSBFIRST,[max_dat]
+  IF odd = 0  THEN noLoad  ' If odd is 1, pulse Load line.
+  PULSOUT Load,1
+NoLoad:        ' Else, don't pulse.
+NEXT        ' Get next item from table.
+
+' ====================== MAIN PROGRAM LOOP ==========================
+' Now that the MAX7219 is properly initialized, we're ready to send it
+' data. The loop below increments a 16-bit counter and displays it on
+' the LEDs connected to the MAX. Subroutines below handle the details
+' of converting binary values to binary-coded decimal (BCD) digits and
+' sending them to the MAX.
+
+  'dispVal(5) = 1
+  'dispVal.bit0(8)=1
+  'debug ? dispVal(1)
+  'carry = 1
+Loop:
+  'for cycle = 1 to 56
+  'if cycle = nina then on
+  'carry=0
+  'goto off
+on:  'carry=1
+off:  'gosub MaxDisplay
+  'dispVal.bit7(cycle) = carry
+  'next
+  'nina=nina+1 max 56
+  'goto loop
+
+' ========================= SUBROUTINES ============================
+' The MAX7219 won't accept a number like "2742" and display it on
+' the LEDs. Instead, it expects the program to send it individual
+' digits preceded by their position on the display. For example,
+' "2742" on a five-digit display would be expressed as:
+' "digit 5: blank; digit 4: 2; digit 3: 7; digit 2: 4; digit 1: 2"
+' The routine MaxDisplay below does just that, separating a value
+' into individual digits and sending them to the MAX7219. If the
+' lefthand digits are zero (as in a number like "102") the
+' routine sends blanks, not zeros until it encounters the first
+' non-zero digit. This is called "leading-zero blanking."
+
+dispVal(0)=$FF
+dispVal(1)=$03
+FOR index = 2 TO 8
+dispVal(index)=dispVal(index-1)*2
+dispVal(9)=$00
+'debug ? index, ? dispVal(index)
+NEXT
+nina = 00
+top = 0
+cycle =1
+flp =0
+led=$55
+
+newavg:  av=av+1
+  'debug ?av
+  initr=0
+  gsrinit=0
+  IF av=15 THEN downtime
+
+nina = 50
+
+MaxDisplay:
+'*****************
+
+GOTO domore
+'*****************
+
+  PULSIN 1,1,gsr  'read in the gsr value from calmpute
+      'then compare current gsr reading to initial one
+      'establish a loop delay value.
+  LOOKDOWN gsr,>[gsrinit+(5*gsra),gsrinit+(4*gsra),gsrinit+(3*gsra) ,gsrinit+(2*gsra),gsrinit+gsra,gsrinit,gsrinit-gsra,gsrinit-(2*gsra),gsrinit-(3*gsra),gsrinit-(4*gsra),gsrinit-(5*gsra),gsrinit-(6*gsra),gsrinit-(7*gsra),gsrinit-(8*gsra)],nina
+  IF gsr=0 THEN newavg  'if no gsr value then re initialize for next participant
+  IF initr<>1 THEN bean  'detect second pass with gsr <> 0
+  gsrinit=gsr+(gsr/20)  'remember gsr+5% as initial gsr value
+  gsra=gsrinit/50    'establish base offset for gsr comparisons
+bean:  initr=initr+1 MAX 2  'track initial cycle count
+  IF initr<2 THEN nonDisplay
+  IF av=0 THEN domore  'on any pass except the first one
+  PULSOUT 2,10000    'start playback of the audio voice tracks
+
+domore:
+
+  av=0
+'  pause 20    'main cycle delay makes things work better
+'  DEBUG ? gsrinit,? gsra,? gsr,? nina, HOME  '
+'  DEBUG ? nina
+panda:
+  bp=1
+pong:
+' DEBUG ? bp
+'  FOR bp = 1 TO 8      'work from lsb to msb
+'  index =1
+  FOR index = 1 TO 8    'Work from digit 1 down to digit 8.
+
+
+  SHIFTOUT DATA_n,CLK,MSBFIRST,[index]  'Send digit position.
+'  SHIFTOUT DATA_n,CLK,MSBFIRST,[dispVal(bp)]' Send the digit.
+  SHIFTOUT DATA_n,CLK,MSBFIRST,[bp]' Send the digit.
+  PULSOUT Load,PulseLength
+
+'  FOR DL = 1 TO 8
+
+  PAUSE nina
+'  NEXT
+
+  SHIFTOUT DATA_n,CLK,MSBFIRST,[index]  'Send digit position.
+  SHIFTOUT DATA_n,CLK,MSBFIRST,[0]' Send the digit.
+
+  PULSOUT Load,PulseLength      'And load the display.
+'  PAUSE nina      'nina is variable wait period
+'  NEXT        'index
+  NEXT        'bp
+
+  IF bp>64 THEN ping
+   bp = bp << 1
+'  bp=bp*2
+  GOTO pong
+ping:
+  bp=1
+'  RANDOM nina
+'   DEBUG ? nina
+  GOTO pong
+  GOTO Maxdisplay
+'*******************
+STOP
+'*******************
+
+downtime:RANDOM gsra    'when not doing any one's gsr
+  nina=3*(gsra/6553)  'mark time with an occasional whip around
+  GOTO domore    'the ring of leds
+
+
+
+nonDisplay:
+  PAUSE 1000    'during initialization this delay takes the
+  GOTO MaxDisplay    'place of the time taken up by the display
+        'routines.

@@ -1,0 +1,245 @@
+'{$STAMP BS2sx}
+'{$PBASIC 2.5}
+'________________________________________________________________
+' Investigate Stress GSR Biofeedback demonstration
+' May 2008 by Peter Reintjes
+' Museum of Life and Science, Durham, NC
+'
+' Original version of this code from
+' Harmony and Health GSR / Bio Feedback display Mar '07
+' by Brian Hambleton of the Ontario Science Center
+'_________________________________________________________________
+
+'Hardware interface with the 7219:
+  DATA_n      CON  7  'Bits are shifted out this pin # to 7219.
+  CLK         CON  5  'Data valid on rising edge of this clock pin.
+  Load        CON  6  'Tells 7219 to transfer data to LEDs.
+  LoadPulse   CON  5  'Pulse width for loading MAX7218
+
+' To control attributes of the display, write the register
+' address (brite) followed by the data (15 for max brightness)
+
+  max_data    VAR  Word ' Word to be sent to MAX7219.
+  bp          VAR  Byte ' bit position counter
+  decode      CON  9   ' BCD decoding on(1) or off(0)
+  brite       CON  10   ' Intensity 0-15
+  scan        CON  11   ' Number of digits
+  switch      CON  12   ' LED Power on/off
+
+'__________________________________________________________________
+'Interface with the GSR2
+
+  PulseType       CON   0    ' Type of Measurement 0-to-[1] or 1-to-[0]
+
+  gsr             VAR Word   ' GSR pulse length
+  prevGSR         VAR Word   ' previous GSR pulse length
+  prev2GSR        VAR Word   ' previous GSR pulse length
+
+  HighGSR         VAR Word   ' Highest GSR Reading of current user
+  LowGSR          VAR Word   ' Lowest GSR Reading of current user
+
+  index    VAR  Byte     'FOR LOOP index for Main loop
+  index2   VAR  Byte     'FOR LOOP index (in subroutines)
+  initial  VAR  Byte     'True for the first GSR reading of a user
+  idle     VAR  Byte
+
+  Delay    VAR Byte  ' Delay value for LED ring speed
+  DecDelta    VAR Byte
+  IncDelta    VAR Byte
+
+  tempa    VAR Word
+  tempb    VAR Word
+  cntr     VAR Word
+
+  FastDisp  CON 1   ' Minimum delay (fastest rotation of LEDs)
+  SlowDisp  CON 96  ' Maximum delay (slowest rotation of LEDs)
+
+  OUTS = 0        'All output latches low.
+  DIRS = $FFFF    'All pins to output.
+  initial = 1     'Need to do GSR Calibration for new User
+
+  GOSUB InitializeMax
+
+' ====================== MAIN PROGRAM LOOP ==========================
+' Initialize the MAX7219 and demonstrate several different speeds.
+
+  FOR index = 0 TO 4
+     LOOKUP index, [32,25,10,5,2], Delay
+     GOSUB Spin
+  NEXT
+  cntr = 0
+
+Main:
+  GOSUB GetGSRValue
+  bp=1
+  DO
+
+   FOR index = 1 TO 8                    ' FROM digit 1 to digit 8.
+    SHIFTOUT DATA_n,CLK,MSBFIRST,[index] ' Select Digit
+    SHIFTOUT DATA_n,CLK,MSBFIRST,[bp]    ' LED ON
+    PULSOUT Load,LoadPulse
+
+    PAUSE Delay
+
+    SHIFTOUT DATA_n,CLK,MSBFIRST,[index] ' Select Digit
+    SHIFTOUT DATA_n,CLK,MSBFIRST,[0]     ' LED OFF
+    PULSOUT Load,LoadPulse
+   NEXT        ' index
+   bp = bp << 1
+  LOOP UNTIL bp = 0
+
+GOTO Main  ' Main Program loops forever
+
+END
+
+'
+' Subroutine GetGSRValue increments the Delay variable
+' whenever the GSR reading has increased resistance
+' indicating that the Subject is more relaxed and decrements
+' but failing to read a good value for more than 6 seconds
+' will put the system in its 'initial' mode whereby it
+' expects to recalibrate for a new user.
+'
+
+  GetGSRValue:
+
+        idle = idle + 1
+        IF (idle > 30) THEN  ' ~10 sec idle resets everything
+             initial = 1
+             idle = 0
+             GOSUB Blank      ' and turns off the LED display
+        ENDIF
+
+	GOSUB GetMedian
+	IF (gsr = 0 OR gsr>255) THEN GetGSRValue
+
+	idle = 0
+	IF ( initial = 1 ) THEN
+		initial = initial + 1
+		Delay = FastDisp
+		GOTO GetGSRValue
+	ENDIF
+
+	IF (initial < 200) THEN
+		Delay = FastDisp
+		initial = initial + 1
+
+		prev2GSR = prevGSR
+		prevGSR = gsr
+		GOSUB GetMedian
+		RETURN
+	ENDIF
+
+	cntr = cntr + 1
+
+	IF ((cntr // 5) = 0) THEN
+
+		  '  Scale the Increment According to the current speed
+		  IF (DELAY < 8) THEN
+		          IncDelta = 1
+		          DecDelta = 1
+		  ELSEIF (Delay < 14) THEN
+		          IncDelta = 2
+		          DecDelta = 1
+		  ELSEIF (Delay < 23)  THEN
+		          IncDelta = 4
+		          DecDelta = 2
+		  ELSE
+		          IncDelta = 8
+		          DecDelta = 4
+		  ENDIF
+
+		IF ((cntr // 250) = 0) THEN
+			DEBUG ? Delay
+			DEBUG ? IncDelta
+			DEBUG ? DecDelta
+		ENDIF
+
+  ' Compute the new Delay value
+
+   IF ( gsr > prevGSR AND prevGSR > prev2GSR) THEN  Delay = Delay + IncDelta
+   IF ( gsr < prevGSR AND prevGSR < prev2GSR) THEN  Delay = Delay - DecDelta
+
+   prev2GSR = prevGSR
+   prevGSR = gsr
+   GOSUB GetMedian
+
+
+  IF (Delay < FastDisp) THEN      ' Keep Delay withing Range
+      Delay = FastDisp
+  ELSEIF (Delay > SlowDisp) THEN
+      Delay = SlowDisp
+  ENDIF
+
+ ENDIF ' Every Fifth time
+
+  RETURN
+
+
+' Initialize the MAX7219 from a list of ( REGISTER : VALUE ) pairs
+' Digits 0-(7), max brightness (15), no BCD decoding(0), LED power ON(1)
+' The load pulse comes after we shift 16 bits into the MAX7219
+
+ InitializeMax:
+
+  FOR index2 = 0 TO 7    'Retrieve 8 items from table.
+     LOOKUP index2,[scan,7,brite,1,decode,0,switch,1],max_data
+     SHIFTOUT DATA_n,CLK,MSBFIRST,[max_data]
+     IF index2.BIT0 = 1 THEN PULSOUT Load,LoadPulse
+  NEXT
+
+ RETURN
+
+ Spin:
+    bp=1
+    DO
+      FOR index2 = 0 TO 8    'Work from digit 1 down to digit 8.
+
+       SHIFTOUT DATA_n,CLK,MSBFIRST,[index2] ' Digit position
+       SHIFTOUT DATA_n,CLK,MSBFIRST,[bp]     ' Select Segment
+       PULSOUT Load,LoadPulse
+
+       PAUSE Delay
+
+       SHIFTOUT DATA_n,CLK,MSBFIRST,[index2] ' Digit position
+       SHIFTOUT DATA_n,CLK,MSBFIRST,[0]      ' Clear Segment(s)
+       PULSOUT Load,LoadPulse                ' Load the display
+
+      NEXT        ' index2
+    bp = bp << 1
+  LOOP UNTIL bp = 0
+  RETURN
+
+  Blank:
+   FOR index2 = 1 TO 8                       'From digit 1 to digit 8.
+       SHIFTOUT DATA_n,CLK,MSBFIRST,[index2] 'Send digit position.
+       SHIFTOUT DATA_n,CLK,MSBFIRST,[0]      'Send the digit.
+       PULSOUT Load,LoadPulse                'And load the display.
+   NEXT        ' index2
+  RETURN
+
+ ' Return the median of three readings
+
+ GetMedian:
+    PULSIN 1,PulseType,tempa
+    PULSIN 1,PulseType,gsr
+    PULSIN 1,PulseType,tempb
+
+    IF gsr > tempa THEN
+       IF gsr > tempb THEN
+         IF tempa > tempb THEN
+             gsr = tempa
+         ELSE
+             gsr = tempb
+         ENDIF
+       ENDIF
+    ELSE  ' gsr < tempa
+       IF gsr < tempb THEN
+         IF tempa < tempb THEN
+             gsr = tempa
+         ELSE
+             gsr = tempb
+         ENDIF
+       ENDIF
+    ENDIF
+ RETURN

@@ -1,0 +1,147 @@
+'{$STAMP BS2sx}
+'________________________________________________________________
+
+'Program:
+' Harmony and Health GSR / Bio Feedback display Mar '07
+'Initilalization section
+'_________________________________________________________________
+'Constant declaration:
+
+'Hardware interface with the 7219:
+  DATA_n  CON  7  'Bits are shifted out this pin # to 7219.
+  CLK     CON  5  'Data valid on rising edge of this clock pin.
+  Load    CON  6  'Tells 7219 to transfer data to LEDs.
+
+'Register addresses for the MAX7219. To control a given attribute
+'of the display, for instance its brightness or the number shown
+'in a particular digit, you write the register address followed
+'by the data. For example, to set the brightness, you'd send
+''brite' followed by a number from 0 (off) to 15 (100% bright).
+
+  PulseLength CON 5  'Pulse lenght value to display
+  decode   CON  9    'Decode register; a 1 turns on BCD decoding.
+  brite  CON  10     'Decode register; intensity register.
+  scan  CON  11      'Decode register; scan-limit register.
+  switch  CON  12    'Decode register; on/off register.
+  test  CON  15      'Activates test mode (all digits on, 100% bright)
+'__________________________________________________________________
+'Variable declaration:
+'Variables used in the program.
+
+
+  max_dat  VAR  Word         'Word to be sent to MAX7219.
+  gsr      VAR  Word         'gsr pulse length
+  gsra     VAR  Word         'average gsr pulse length
+
+  bp       VAR  Byte         'bit position counter
+  nina     VAR  Byte         'led bit on counter
+
+  index   VAR  Nib           'Index into setup table.
+
+  odd  VAR  index.BIT0       'Lsb of index.
+  mark VAR Bit
+'The program begins by setting up all pins to output low, matching
+'the state established by the pulldown resistors.
+
+
+  OUTS = 0    'All output latches low.
+  DIRS = $FFFF    'All pins to output.
+
+'Next, it initializes the MAX7219. A lookup table is convenient way
+'to organize the setup data; each register address is paired with
+'its setting data. The table sets the scan limit to 4 (5 digits,
+'numbered 0-4); brightness to 3; BCD decoding to the lower 5 digits
+'(the only ones we're displaying), and switches the display on. The
+'MAX7219 expects data in 16-bit packets, but our lookup table holds
+'a series of 8-bit values. That's why the loop below is designed to
+'pulse the Load line _every_other_ byte transmitted.
+
+  FOR index = 0 TO 7    'Retrieve 8 items from table.
+  LOOKUP index,[scan,7,brite,15,decode,$00,switch,1],max_dat
+  SHIFTOUT DATA_n,CLK,MSBFIRST,[max_dat]
+  IF odd = 0  THEN noLoad  'If odd is 1, pulse Load line.
+  PULSOUT Load,1
+NoLoad:
+  NEXT        'Get next item from table.
+
+
+' ====================== MAIN PROGRAM LOOP ==========================
+' Now that the MAX7219 is properly initialized, we're ready to send it
+' data. The loop below increments a 16-bit counter and displays it on
+' the LEDs connected to the MAX. Subroutines below handle the details
+' of converting binary values to binary-coded decimal (BCD) digits and
+' sending them to the MAX.
+
+  nina = 50
+MaxDisplay:
+
+
+'  PULSIN 1,1,gsr  'read in the gsr value from calmpute
+
+'  IF gsr=0 OR gsr>255 THEN skipgsr
+'  IF gsr=0 OR gsr>255 THEN downtime
+      nina = gsr
+
+skipgsr:
+
+', ? nina
+
+
+panda:
+  bp=1
+pong:
+
+
+  FOR index = 1 TO 8    'Work from digit 1 down to digit 8.
+
+
+  IF mark=1 THEN hop
+
+  SHIFTOUT DATA_n,CLK,MSBFIRST,[index]  'Send digit position.
+
+  SHIFTOUT DATA_n,CLK,MSBFIRST,[bp]'Send the digit.
+  PULSOUT Load,PulseLength
+hop:
+
+  PULSIN 1,1,gsr  'read in the gsr value from calmpute
+'  DEBUG ? gsr
+'  PAUSE nina
+  gsra= gsr >>3
+  IF gsr > 0 THEN   spit
+'  gsra= 5
+  mark =1
+  GOTO penguin
+spit:
+   mark=0
+
+penguin:
+  PAUSE gsra
+'  DEBUG ? mark
+
+  SHIFTOUT DATA_n,CLK,MSBFIRST,[index]  'Send digit position.
+  SHIFTOUT DATA_n,CLK,MSBFIRST,[0]'Send the digit.
+
+  PULSOUT Load,PulseLength      'And load the display.
+spot:
+  NEXT        'bp
+
+
+  IF bp>64 THEN Maxdisplay
+  bp = bp << 1
+
+  GOTO pong
+
+'*******************
+  END
+'*******************
+
+downtime:
+  RANDOM gsra    'when not doing any one's gsr
+  nina=3*(gsra/6553)  'mark time with an occasional whip around
+  GOTO panda    'the ring of leds
+
+
+
+nonDisplay:
+  PAUSE 1000      'during initialization this delay takes the
+  GOTO MaxDisplay    'place of the time taken up by the display routines.
